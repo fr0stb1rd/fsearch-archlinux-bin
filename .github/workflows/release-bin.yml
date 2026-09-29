@@ -62,7 +62,7 @@ jobs:
             sleep 15
           done
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: fr0stb1rd/fsearch
           fetch-depth: 1
@@ -118,7 +118,7 @@ jobs:
             qemu: true
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: fr0stb1rd/fsearch
           fetch-depth: 1
