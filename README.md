@@ -14,3 +14,7 @@ are attached to a release of the same name in this repo.
 
 The `fsearch-bin` AUR package consumes these release tarballs
 (`packaging/aur-bin/PKGBUILD`, coming soon).
+
+## License
+
+[MIT](LICENSE) — FSearch itself is [GPL-2.0-or-later](https://github.com/fr0stb1rd/fsearch/blob/master/LICENSE).
