@@ -87,7 +87,7 @@ jobs:
           tar -tzf fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz | head -30
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fsearch-${{ matrix.arch }}
           path: |
@@ -186,7 +186,7 @@ jobs:
               chmod -R a+rX /w/pkg /w/fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz*'
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fsearch-${{ matrix.arch }}
           path: |
