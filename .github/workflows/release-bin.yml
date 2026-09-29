@@ -1,0 +1,216 @@
+name: release-bin
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Which tag to build and upload to'
+        required: true
+        default: '0.3.1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-bin-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-bin:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+            image: archlinux:latest
+          - runner: ubuntu-latest
+            arch: x86_64_v3
+            image: archlinux:latest
+            cflags: -march=x86-64-v3
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
+      options: --privileged
+    steps:
+      - name: Install build deps
+        run: |
+          if grep -q "^DisableSandbox" /etc/pacman.conf 2>/dev/null; then
+            :
+          elif grep -q "^#DisableSandbox" /etc/pacman.conf 2>/dev/null; then
+            sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
+          else
+            tmpfile=$(mktemp)
+            while IFS= read -r line || [ -n "$line" ]; do
+              printf "%s\n" "$line" >> "$tmpfile"
+              [ "$line" = "[options]" ] && printf "%s\n" "DisableSandbox" >> "$tmpfile"
+            done < /etc/pacman.conf
+            cat "$tmpfile" > /etc/pacman.conf
+            rm -f "$tmpfile"
+          fi
+          pacman-key --init 2>/dev/null || true
+          for kr in /usr/share/pacman/keyrings/*.gpg; do
+            [ -e "$kr" ] || continue
+            pacman-key --populate "$(basename "$kr" .gpg)" 2>/dev/null || true
+          done
+          for i in 1 2 3; do
+            pacman -Syu --noconfirm --needed \
+              base-devel meson ninja \
+              gtk3 glib2 glib2-devel pcre2 icu \
+              itstool appstream pkgconf git && break
+            [ "$i" -lt 3 ] || exit 1
+            sleep 15
+          done
+
+      - uses: actions/checkout@v4
+        with:
+          repository: fr0stb1rd/fsearch
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ inputs.tag }}
+
+      - name: Build
+        run: |
+          echo "compiler: $(cc -dumpmachine)"
+          if [ -n "${{ matrix.cflags }}" ]; then
+            export CFLAGS="${{ matrix.cflags }}" CXXFLAGS="${{ matrix.cflags }}"
+          fi
+          meson setup build --prefix=/usr --buildtype=release -Dchannel=other
+          meson compile -C build
+          meson test -C build --print-errorlogs
+
+      - name: Stage install + tarball
+        run: |
+          DESTDIR="$PWD/pkg" meson install -C build
+          tar -czf fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz -C pkg usr
+          sha256sum fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz | tee fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz.sha256
+          tar -tzf fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz | head -30
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsearch-${{ matrix.arch }}
+          path: |
+            fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz
+            fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  build-port:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            rootfs: http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+            qemu: false
+          - arch: riscv64
+            runner: ubuntu-24.04-riscv
+            platform: linux/riscv64
+            rootfs: https://riscv.mirror.pkgbuild.com/images/archriscv-latest.tar.zst
+            qemu: false
+          - arch: armv7h
+            runner: ubuntu-latest
+            platform: linux/arm/v7
+            rootfs: http://os.archlinuxarm.org/os/ArchLinuxARM-armv7-latest.tar.gz
+            qemu: true
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: fr0stb1rd/fsearch
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ inputs.tag }}
+
+      - name: Set up QEMU
+        if: ${{ matrix.qemu }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Import official rootfs
+        run: |
+          url="${{ matrix.rootfs }}"
+          curl -L --fail --retry 3 -o rootfs.dl "$url"
+          case "$url" in
+            *.tar.zst)
+              command -v unzstd >/dev/null || sudo -n apt-get install -y zstd
+              unzstd -f rootfs.dl -o rootfs.tar
+              ;;
+            *)
+              mv rootfs.dl rootfs.tar
+              ;;
+          esac
+          docker import --platform ${{ matrix.platform }} rootfs.tar fsearch-port:${{ matrix.arch }}
+          rm -f rootfs.dl rootfs.tar
+
+      - name: Build in rootfs container
+        run: |
+          docker run --rm --privileged --platform ${{ matrix.platform }} \
+            -v "$PWD:/w" -w /w -e LANG=C.UTF-8 fsearch-port:${{ matrix.arch }} \
+            bash -c 'set -e
+              if grep -q "^DisableSandbox" /etc/pacman.conf 2>/dev/null; then
+                :
+              elif grep -q "^#DisableSandbox" /etc/pacman.conf 2>/dev/null; then
+                sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
+              else
+                tmpfile=$(mktemp)
+                while IFS= read -r line || [ -n "$line" ]; do
+                  printf "%s\n" "$line" >> "$tmpfile"
+                  [ "$line" = "[options]" ] && printf "%s\n" "DisableSandbox" >> "$tmpfile"
+                done < /etc/pacman.conf
+                cat "$tmpfile" > /etc/pacman.conf
+                rm -f "$tmpfile"
+              fi
+              pacman-key --init 2>/dev/null || true
+              for kr in /usr/share/pacman/keyrings/*.gpg; do
+                [ -e "$kr" ] || continue
+                pacman-key --populate "$(basename "$kr" .gpg)" 2>/dev/null || true
+              done
+              for i in 1 2 3; do
+                pacman -Syu --noconfirm --needed \
+                  base-devel meson ninja \
+                  gtk3 glib2 glib2-devel pcre2 icu \
+                  itstool appstream pkgconf git && break
+                [ "$i" -lt 3 ] || exit 1
+                sleep 15
+              done
+              echo "compiler: $(cc -dumpmachine)"
+              meson setup build --prefix=/usr --buildtype=release -Dchannel=other
+              meson compile -C build
+              meson test -C build --print-errorlogs
+              DESTDIR=/w/pkg meson install -C build
+              tar -czf /w/fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz -C /w/pkg usr
+              sha256sum /w/fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz | tee /w/fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz.sha256
+              chmod -R a+rX /w/pkg /w/fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz*'
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsearch-${{ matrix.arch }}
+          path: |
+            fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz
+            fsearch-${{ inputs.tag }}-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [build-bin, build-port]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fsearch-*
+          merge-multiple: true
+          path: dist
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: dist/*
+          fail_on_unmatched_files: true
